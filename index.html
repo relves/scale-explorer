@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scale Explorer</title>
+<style>
+  :root {
+    --bg: #f6f4ee; --ink: #1f3d2b; --dim: #c4c8c0; --accent: #1f7a4a;
+    --box: #e3f1e8; --muted: #7a857d; --diat: #d98b1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151a17; --ink: #dfeee4; --dim: #3c443f; --accent: #4fc287;
+            --box: #1f3328; --muted: #8a978e; --diat: #f0a944; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: ui-rounded, system-ui, sans-serif; height: 100vh;
+         display: flex; flex-direction: column; }
+  header { padding: 12px 20px; display: flex; gap: 16px; align-items: baseline; }
+  header h1 { font-size: 18px; margin: 0; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  main { flex: 1; min-height: 0; display: flex; gap: 24px; padding: 0 12px; }
+  aside { width: 270px; flex: none; display: flex; flex-direction: column; gap: 24px; min-height: 0; }
+  #wheel { width: 270px; height: 270px; flex: none; }
+  #stage { flex: 1; min-width: 0; min-height: 0; }
+  #explain { margin: 0; font-size: 15px; line-height: 1.6; color: var(--ink); overflow-y: auto;
+             border-left: 3px solid var(--diat); padding: 6px 8px 6px 14px; }
+  #explain:empty { display: none; }
+  #explain b { color: var(--diat); }
+  svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .bar { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 20px 20px; }
+  .bar .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: center; }
+  .bar button { font: inherit; font-size: 16px; min-width: 46px; height: 42px;
+         border-radius: 21px; border: 1.5px solid var(--ink); background: transparent;
+         color: var(--ink); cursor: pointer; }
+  .bar button.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  .sep { width: 24px; }
+  text { font-size: 15px; dominant-baseline: central; text-anchor: middle; fill: currentColor; }
+  .clickable { cursor: pointer; }
+  .clickable:hover rect, .clickable:hover circle { stroke-width: 2.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Scale Explorer</h1>
+  <p id="info"></p>
+</header>
+<main>
+  <aside><svg id="wheel" viewBox="0 0 336 336"></svg><p id="explain"></p></aside>
+  <div id="stage"><svg id="svg" preserveAspectRatio="xMinYMid meet"></svg></div>
+</main>
+<div class="bar"><div class="row" id="actions"></div></div>
+
+<script>
+const SHARPS = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const FLATS  = ['C','D♭','D','E♭','E','F','G♭','G','A♭','A','B♭','B'];
+const SCALES = {
+  major: { steps: [0,2,4,5,7,9,11], qual: ['M','m','m','M','M','m','d'] },
+  minor: { steps: [0,2,3,5,7,8,10], qual: ['m','d','M','m','m','M','M'] },
+};
+// diatonic seventh-chord qualities per degree
+const SEVENTHS = {
+  major: ['maj7','m7','m7','maj7','7','m7','ø7'],
+  minor: ['m7','ø7','maj7','m7','m7','maj7','7'],
+};
+// chord column definitions: tones are semitones above the chord root
+const TRIADS = [
+  { id: 'M', label: 'Maj', tones: [0, 4, 7] },
+  { id: 'm', label: 'min', tones: [0, 3, 7] },
+  { id: 'd', label: 'dim', tones: [0, 3, 6], onlyIfDiatonic: true },
+];
+const SEVENS = [
+  { id: 'maj7', label: 'maj7', tones: [0, 4, 7, 11] },
+  { id: '7',    label: '7',    tones: [0, 4, 7, 10] },
+  { id: 'm7',   label: 'm7',   tones: [0, 3, 7, 10] },
+  { id: 'ø7',   label: 'm7♭5', tones: [0, 3, 6, 10], onlyIfDiatonic: true },
+];
+const DEG = { 0: '1', 3: '♭3', 4: '3', 6: '♭5', 7: '5', 10: '♭7', 11: '7' };
+const MAJ = [0, 2, 4, 5, 7, 9, 11];
+const ROMAN = ['i','ii','iii','iv','v','vi','vii'];
+// keys that prefer flats
+const FLAT_MAJOR = new Set([5,10,3,8,1]);      // F Bb Eb Ab Db
+const FLAT_MINOR = new Set([2,7,0,5,10,3]);    // D G C F Bb Eb
+
+const state = { root: 0, mode: 'major', degree: null, showScale: false, sevenths: false, dominants: false, chain: 1 }; // chain: how many dominants are stacked before the chord
+
+const name = n => {
+  n = ((n % 12) + 12) % 12;
+  const flat = (state.mode === 'major' ? FLAT_MAJOR : FLAT_MINOR).has(state.root);
+  return (flat ? FLATS : SHARPS)[n];
+};
+// key r spelled as it would be in mode m (F♯ major, E♭ minor, ...)
+const keyName = (r, m) => ((m === 'major' ? FLAT_MAJOR : FLAT_MINOR).has(r) ? FLATS : SHARPS)[r];
+const numeral = deg => {
+  const q = SCALES[state.mode].qual[deg];
+  let r = ROMAN[deg];
+  if (q === 'M') r = r.toUpperCase();
+  if (!state.sevenths) return q === 'd' ? r + '°' : r;
+  const s7 = SEVENTHS[state.mode][deg];
+  return r + (s7 === 'maj7' ? 'maj7' : s7 === 'ø7' ? 'ø7' : '7');
+};
+// numeral of the dominant that resolves to a degree: V7 for I, else V7/ii etc.
+const domNumeral = deg => {
+  if (deg === 0) return 'V7';
+  const q = SCALES[state.mode].qual[deg];
+  return 'V7/' + (q === 'M' ? ROMAN[deg].toUpperCase() : ROMAN[deg]);
+};
+const chordSuffix = deg => {
+  if (state.sevenths) { const s7 = SEVENTHS[state.mode][deg]; return s7; }
+  const q = SCALES[state.mode].qual[deg];
+  return q === 'm' ? 'm' : q === 'd' ? '°' : '';
+};
+
+// ---- controls ----
+const actions = document.getElementById('actions');
+function buildBar() {
+  actions.innerHTML = '';
+  const t = document.createElement('button');
+  t.textContent = 'Highlight chord root\'s major scale';
+  t.title = 'Show the chord root\'s major scale under each chord column';
+  t.style.padding = '0 16px';
+  t.className = state.showScale ? 'on' : '';
+  t.onclick = () => { state.showScale = !state.showScale; render(); };
+  // only offer the highlight when chord columns are on screen
+  if (state.degree !== null) actions.appendChild(t);
+  const s7 = document.createElement('button');
+  s7.textContent = '7th chords';
+  s7.style.padding = '0 16px';
+  s7.className = state.sevenths ? 'on' : '';
+  s7.onclick = () => { state.sevenths = !state.sevenths; render(); };
+  actions.appendChild(s7);
+  const dm = document.createElement('button');
+  dm.textContent = '+ Dominant';
+  dm.title = 'Show the dominant 7th chord that leads into the selected chord';
+  dm.style.padding = '0 16px';
+  dm.className = state.dominants ? 'on' : '';
+  dm.onclick = () => {
+    state.dominants = !state.dominants;
+    if (state.dominants && state.degree === null) state.degree = 0; // never a blank add-on
+    render();
+  };
+  actions.appendChild(dm);
+}
+
+// ---- drawing ----
+const svg = document.getElementById('svg');
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs, parent) => {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  (parent || svg).appendChild(e);
+  return e;
+};
+const txt = (x, y, s, attrs, parent) => {
+  const t = el('text', { x, y, ...attrs }, parent);
+  t.textContent = s; return t;
+};
+
+const ROWH = 32, TOP = 30, SCALE_X = 100;
+let ROWS = 24, H = 0; // rows 0..23 (degree up to 11 + octave); taller in dominants view
+const rowY = r => H - 30 - r * ROWH;           // row 0 at bottom
+function drawChordCol(c, off, chordRoot) {
+  const ink = 'var(--ink)', dim = 'var(--dim)', y0 = rowY(off);
+  const tones = c.tones;
+  const flat5 = tones.includes(6);
+  for (let j = 0; j <= 12; j++) {
+    const y = rowY(off + j);
+    const inScale = state.showScale && MAJ.includes(j % 12);
+    if (inScale)
+      el('circle', { cx: c.x, cy: y, r: 14, fill: 'var(--box)', stroke: 'var(--accent)',
+        'stroke-width': 1, opacity: tones.includes(j) ? 0.9 : 0.6 });
+    if (tones.includes(j)) {
+      el('rect', { x: c.x - 18, y: y - 13, width: 36, height: 26, rx: 4,
+        fill: c.diat ? 'var(--box)' : 'var(--bg)', 'fill-opacity': inScale ? 0.35 : 1,
+        stroke: c.diat ? 'var(--diat)' : 'var(--accent)', 'stroke-width': c.diat ? 2.5 : 1.5 });
+      txt(c.x, y, name(chordRoot + j), { fill: ink, 'font-weight': 600 });
+      const altered = DEG[j].startsWith('♭');
+      txt(c.x - 34, y, DEG[j], { fill: altered ? 'var(--diat)' : 'var(--accent)',
+        'font-size': 12, 'font-weight': 700, 'text-anchor': 'end' });
+    } else if (flat5 && j === 7) {
+      // ghost of the natural 5th that this chord flattens
+      el('rect', { x: c.x - 18, y: y - 13, width: 36, height: 26, rx: 4, fill: 'none',
+        stroke: 'var(--muted)', 'stroke-width': 1.3, 'stroke-dasharray': '4 3' });
+      txt(c.x, y, name(chordRoot + j), { fill: 'var(--muted)', 'font-size': 13 });
+      txt(c.x - 34, y, '5', { fill: 'var(--muted)', 'font-size': 12, 'text-anchor': 'end' });
+      const yb = rowY(off + 6);
+      el('path', { d: `M${c.x - 26},${y + 4} Q${c.x - 30},${(y + yb) / 2} ${c.x - 21},${yb - 6}`,
+        fill: 'none', stroke: 'var(--diat)', 'stroke-width': 1.5, 'marker-end': 'url(#arrd)' });
+    } else {
+      txt(c.x, y, name(chordRoot + j), inScale
+        ? { fill: ink, 'font-size': 13 } : { fill: dim, 'font-size': 13 });
+    }
+  }
+  // interval arrows between consecutive chord tones
+  const arc = (a, b, n) => {
+    const ya = rowY(off + a), yb = rowY(off + b), xr = c.x + 20;
+    el('path', { d: `M${xr},${ya - 6} C${xr + 26},${ya - 10} ${xr + 26},${yb + 10} ${xr + 2},${yb + 6}`,
+      fill: 'none', stroke: 'var(--accent)', 'stroke-width': 1.1, opacity: 0.5, 'marker-end': 'url(#arr)' });
+    txt(xr + 28, (ya + yb) / 2, n, { fill: 'var(--muted)', 'font-size': 6.5, opacity: 0.6, 'text-anchor': 'start' });
+  };
+  for (let k = 1; k < tones.length; k++) arc(tones[k - 1], tones[k], tones[k] - tones[k - 1]);
+  txt(c.x, y0 + 26, c.label + (c.diat && !c.dom ? ' ✓' : ''),
+    { fill: c.diat ? 'var(--diat)' : 'var(--muted)', 'font-size': 13, 'font-weight': c.diat ? 700 : 400 });
+}
+
+function render() {
+  buildBar();
+  ROWS = state.dominants ? 27 : 24;
+  H = TOP + ROWS * ROWH + 30;
+  svg.innerHTML = '';
+  el('defs', {}).innerHTML =
+    `<marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+       <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+     <marker id="arrd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+       <path d="M0,0 L10,5 L0,10 z" fill="var(--diat)"/></marker>`;
+
+  const sc = SCALES[state.mode];
+  const x = SCALE_X;
+  const exEl = document.getElementById('explain');
+  exEl.innerHTML = '';
+  const ink = 'var(--ink)', dim = 'var(--dim)';
+
+
+  // scale column: 13 rows (root .. octave)
+  for (let s = 0; s <= 12; s++) {
+    const deg = sc.steps.indexOf(s % 12);
+    const inKey = deg !== -1;
+    const y = rowY(s);
+    const g = el('g', inKey ? { class: 'clickable' } : {});
+    if (inKey) {
+      const sel = state.degree === deg && s < 12;
+      el('circle', { cx: x, cy: y, r: 14,
+        fill: sel ? 'var(--accent)' : 'var(--box)',
+        stroke: 'var(--accent)', 'stroke-width': 1.5 }, g);
+      txt(x, y, name(state.root + s), { fill: sel ? 'var(--bg)' : ink, 'font-weight': 600 }, g);
+      txt(x - 38, y, numeral(deg), { fill: 'var(--muted)', 'font-size': 13, 'font-style': 'italic' }, g);
+      g.onclick = () => { state.degree = state.degree === deg ? null : deg; state.chain = 1; render(); };
+    } else {
+      txt(x, y, name(state.root + s), { fill: dim }, g);
+    }
+  }
+
+  // resolution arrows: dashed curve with 'resolves to' along it
+  const resolve = (id, fromX, fromRow, toX, toRow) => {
+    // start at the left edge of the dominant's root box
+    const sx = fromX - 18, ys = rowY(fromRow), ye = rowY(toRow) + 8;
+    const cx = sx - 10, ex = toX + 20;
+    el('path', { d: `M${sx},${ys} Q${cx},${ye} ${ex},${ye}`,
+      fill: 'none', stroke: 'var(--accent)', 'stroke-width': 1.1, opacity: 0.5,
+      'stroke-dasharray': '5 4', 'marker-end': 'url(#arr)' });
+    // the arrow runs right-to-left, so lay the label on an invisible copy drawn
+    // left-to-right: text stays upright and dy<0 puts it on the upper side
+    el('path', { id, d: `M${ex},${ye} Q${cx},${ye} ${sx},${ys}`, fill: 'none', stroke: 'none' });
+    const tp = el('textPath', { href: '#' + id, startOffset: '50%', 'text-anchor': 'middle' },
+      el('text', { dy: -6, fill: 'var(--muted)', opacity: 0.8, 'font-size': 12, 'font-style': 'italic' }));
+    tp.textContent = 'resolves to';
+  };
+  // chord columns
+  if (state.degree !== null) {
+    const off = sc.steps[state.degree];
+    const chordRoot = state.root + off;
+    const diatId = state.sevenths ? SEVENTHS[state.mode][state.degree] : sc.qual[state.degree];
+    const y0 = rowY(off);
+    const cols = (state.sevenths ? SEVENS : TRIADS)
+      .filter(d => !d.onlyIfDiatonic || d.id === diatId)
+      .map((d, i) => ({ ...d, x: x + 120 * (i + 1), diat: d.id === diatId }));
+    // connector
+    el('line', { x1: x + 16, y1: y0, x2: cols[cols.length - 1].x - 16, y2: y0, stroke: 'var(--accent)', 'stroke-width': 1.5 });
+
+    for (const c of cols) drawChordCol(c, off, chordRoot);
+
+    // dominants on: add the (secondary) dominant that resolves to this chord
+    if (state.dominants) {
+      const last = cols[cols.length - 1].x, target = cols.find(c => c.diat);
+      const chain = []; // [{ off, name }] from the chord's own dominant outward
+      if (sc.qual[state.degree] !== 'd') {
+        const D7 = SEVENS.find(d => d.id === '7');
+        // each dominant's root is a 4th below the chord it resolves to when that fits, so its tones
+        // sit on the same rows as its target's; otherwise a 5th above (same note, octave up)
+        const place = prev => prev - 5 >= 0 ? prev - 5 : prev + 7;
+        let prevOff = off, prevX = target.x, x0 = last;
+        for (let k = 0; k < state.chain; k++) {
+          const dOff = place(prevOff);
+          if (dOff + 12 > ROWS - 1) break;
+          const nm = name(state.root + dOff);
+          const lbl = k === 0 ? domNumeral(state.degree)
+            : k === 1 && state.degree === 0 ? 'V7/V' : `V7 of ${chain[k - 1].name}7`;
+          const dc = { ...D7, x: x0 + 140, diat: true, dom: true, label: `${lbl} · ${nm}7` };
+          drawChordCol(dc, dOff, state.root + dOff);
+          resolve('res-' + k, dc.x, dOff, prevX, prevOff);
+          chain.push({ off: dOff, name: nm });
+          prevOff = dOff; prevX = dc.x; x0 = dc.x;
+        }
+        // controls under the outermost dominant: add the dominant that leads into it, or drop it
+        const by = rowY(prevOff) + 48;
+        const nextOff = place(prevOff);
+        const ctl = (dx, label, fn, dy = 0) => {
+          const g = el('g', { class: 'clickable' });
+          txt(prevX + dx, by + dy, label, { fill: 'var(--accent)', 'font-size': 12, 'font-weight': 600 }, g);
+          g.onclick = fn;
+        };
+        const canAdd = chain.length === state.chain && nextOff + 12 <= ROWS - 1;
+        if (canAdd) ctl(0, `+ dominant of ${chain[chain.length - 1].name}7`, () => { state.chain++; render(); });
+        if (state.chain > 1) ctl(0, '− remove', () => { state.chain--; render(); }, canAdd ? 18 : 0);
+        state.chain = chain.length;
+      }
+      explain(off, chain);
+    }
+  }
+
+  // info line
+  const scaleNames = sc.steps.map(s => name(state.root + s)).join(' ');
+  let info = `${name(state.root)} ${state.mode}: ${scaleNames}`;
+  if (state.degree !== null) {
+    const o = sc.steps[state.degree];
+    info += `  ·  ${numeral(state.degree)} = ${name(state.root + o)}${chordSuffix(state.degree)}`;
+    if (state.dominants && sc.qual[state.degree] !== 'd')
+      info += `  ·  ${domNumeral(state.degree)} = ${name(state.root + o + 7)}7 → ${name(state.root + o)}${chordSuffix(state.degree)}`;
+  } else info += `  ·  click a scale note to see its ${state.sevenths ? '7th chords' : 'triads'}`;
+  document.getElementById('info').textContent = info;
+
+  // per-chord explainer: why this dominant pulls into the selected chord
+  // zoom the diagram to fit what's drawn; left-aligned so the scale column stays put
+  const bb = svg.getBBox(), pad = 12;
+  svg.setAttribute('viewBox', `${bb.x - pad} ${bb.y - pad} ${bb.width + 2 * pad} ${bb.height + 2 * pad}`);
+  drawWheel();
+
+  function explain(off, chain) {
+    const ex = exEl;
+    const deg = state.degree, q = sc.qual[deg];
+    const R = state.root + off, T = name(R) + chordSuffix(deg);
+    const inKey = n => sc.steps.includes((((n - state.root) % 12) + 12) % 12);
+    if (q === 'd') {
+      ex.innerHTML = `${T} is a <b>diminished</b> chord. It's too unstable to act as a temporary home, ` +
+        `so nothing is normally used as its dominant. It usually works as a dominant itself, pulling toward ${name(R + 1)}.`;
+      return;
+    }
+    const D = name(R + 7), lt = name(R - 1), sev = name(R + 5), third = name(R + (q === 'm' ? 3 : 4));
+    const step = q === 'm' ? 'a whole step' : 'a half step';
+    let h = deg === 0
+      ? `${D}7 is the <b>dominant (V7)</b> of ${T}, built on the 5th note of the key. `
+      : off === 7
+      // the target is the key's own dominant, so this is the dominant of the dominant
+      ? `${D}7 is the <b>secondary dominant ${domNumeral(deg)}</b>. ${T} is the dominant of ${name(state.root)}, ` +
+        `so ${D}7 is the dominant <i>of the dominant</i>. It is the chord that would be V7 if ${name(R)} were the home key, ` +
+        `and it sets up a two-step pull home: ${D}7 → ${name(R)}7 → ${name(state.root)}. `
+      : `${D}7 is the <b>secondary dominant ${domNumeral(deg)}</b>. ${T} isn't a dominant itself. ` +
+        `${D}7 is the chord that would be V7 if ${name(R)} were the home key, borrowed here to lead into ${T}. ` +
+        `In ${name(state.root)} ${state.mode} the actual dominant is ${name(state.root + 7)}7. `;
+    h += `Its 3rd (${lt}) is a half step below ${name(R)} and rises into it, and its ♭7 (${sev}) ` +
+      `falls ${step} to ${third}, the 3rd of ${T}.`;
+    if (!inKey(R - 1)) h += ` ${lt} isn't in ${name(state.root)} ${state.mode}, so this chord briefly steps outside the key to point at ${T}.`;
+    if (chain.length > 1) {
+      const seq = [...chain].reverse().map(c => c.name + '7').join(' → ');
+      h += ` Going further back, each added chord is the dominant of the one to its left, ` +
+        `its 3rd leading a half step up into the next root: ${seq} → ${T}.`;
+    }
+    ex.innerHTML = h;
+  }
+}
+
+// ---- circle of fifths: majors outside, relative minors inside ----
+function drawWheel() {
+  const w = document.getElementById('wheel');
+  w.innerHTML = '';
+  const C = 168, R_HUB = 54, R_MID = 116, R_OUT = 168;
+  const pt = (a, r) => [C + Math.cos(a) * r, C + Math.sin(a) * r];
+  const rad = d => d * Math.PI / 180;
+  let sel = 0;
+  for (let i = 0; i < 12; i++) if ((i * 7 + (state.mode === 'minor' ? 9 : 0)) % 12 === state.root) sel = i;
+  const outerSel = state.mode === 'major';
+  for (const ring of ['major', 'minor']) {
+    const outer = ring === 'major';
+    const r0 = outer ? R_MID : R_HUB, r1 = outer ? R_OUT : R_MID;
+    for (let i = 0; i < 12; i++) {
+      const r = (i * 7 + (outer ? 0 : 9)) % 12;
+      const a0 = rad(-90 + i * 30 - 15), a1 = rad(-90 + i * 30 + 15);
+      const [x0, y0] = pt(a0, r1), [x1, y1] = pt(a1, r1), [x2, y2] = pt(a1, r0), [x3, y3] = pt(a0, r0);
+      const chosen = i === sel && outer === outerSel;
+      const near = Math.abs(((i - sel + 18) % 12) - 6) === 1 && outer === outerSel;
+      const relative = i === sel && outer !== outerSel;
+      const g = el('g', { class: 'clickable' }, w);
+      el('path', { d: `M${x0},${y0} A${r1},${r1} 0 0 1 ${x1},${y1} L${x2},${y2} A${r0},${r0} 0 0 0 ${x3},${y3} Z`,
+        fill: chosen ? 'var(--accent)' : near || relative ? 'var(--box)' : 'var(--bg)',
+        stroke: chosen || near ? 'var(--accent)' : 'var(--dim)', 'stroke-width': 1.5 }, g);
+      const [mx, my] = pt(rad(-90 + i * 30), (r0 + r1) / 2);
+      txt(mx, my, keyName(r, ring) + (outer ? '' : 'm'), { fill: chosen ? 'var(--bg)' : 'var(--ink)',
+        'font-size': outer ? 17 : 13, 'font-weight': outer || chosen ? 700 : 400 }, g);
+      g.onclick = () => { state.root = r; state.mode = ring; state.degree = null; state.chain = 1; render(); };
+    }
+  }
+  // hub: the key and its signature
+  const n = sel;
+  const sig = n === 0 ? 'no ♯/♭' : n === 6 ? '6♯ / 6♭' : n < 6 ? `${n}♯` : `${12 - n}♭`;
+  txt(C, C - 9, keyName(state.root, state.mode), { fill: 'var(--ink)', 'font-size': 16, 'font-weight': 700 }, w);
+  txt(C, C + 11, sig, { fill: 'var(--muted)', 'font-size': 11 }, w);
+}
+
+render();
+addEventListener('resize', render);
+</script>
+</body>
+</html>
