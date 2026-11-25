@@ -39,6 +39,19 @@
   text { font-size: 15px; dominant-baseline: central; text-anchor: middle; fill: currentColor; }
   .clickable { cursor: pointer; }
   .clickable:hover rect, .clickable:hover circle { stroke-width: 2.5; }
+  /* phones: stack wheel, explainer, diagram, buttons and let the page scroll */
+  @media (max-width: 700px) {
+    body { height: auto; min-height: 100vh; }
+    header { flex-direction: column; gap: 4px; padding: 12px 16px; }
+    main { flex-direction: column; gap: 16px; padding: 0 12px; }
+    aside { width: 100%; gap: 16px; align-items: center; }
+    #wheel { width: min(100%, 340px); height: auto; aspect-ratio: 1; }
+    #explain { align-self: stretch; overflow: visible; }
+    #stage { flex: none; }
+    /* never draw larger than 1:1, so the lone scale column doesn't balloon */
+    #svg { height: auto; max-width: calc(var(--vbw) * 1px); margin: 0 auto; }
+    .bar { position: sticky; bottom: 0; background: var(--bg); padding: 10px 12px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -324,6 +337,9 @@ function render() {
   // zoom the diagram to fit what's drawn; left-aligned so the scale column stays put
   const bb = svg.getBBox(), pad = 12;
   svg.setAttribute('viewBox', `${bb.x - pad} ${bb.y - pad} ${bb.width + 2 * pad} ${bb.height + 2 * pad}`);
+  // on phones the diagram takes the full width and its own natural height
+  svg.style.aspectRatio = `${bb.width + 2 * pad} / ${bb.height + 2 * pad}`;
+  svg.style.setProperty('--vbw', bb.width + 2 * pad);
   drawWheel();
 
   function explain(off, chain) {
